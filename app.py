@@ -4,16 +4,16 @@ import pandas as pd
 import io
 import re
 
-# --- INTERFAZ SEGÚN TU SOLICITUD ---
+# --- CONFIGURACIÓN DE INTERFAZ ---
 st.set_page_config(page_title="Procesador CIQA", layout="centered")
 st.markdown("<h1 style='text-align: center;'>Procesador de Informes de Laboratorio</h1>", unsafe_allow_html=True)
 st.markdown("---")
 
-# Diccionario de Siglas (Instrucciones guardadas)
+# Diccionario de Siglas (Basado en tus instrucciones)
 SIGLAS_MAP = {
     "cloro residual": "cloro", "ph": "pH", "turbiedad": "Turbiedad", 
-    "bacteria aerobias heterotroficas": "BAH", "bacterias coliformes totales": "BCT",
-    "escherichia coli": "EC", "pseudomonas aeruginosa": "PA"
+    "bacteria aerobias": "BAH", "coliformes totales": "BCT",
+    "escherichia coli": "EC", "pseudomonas": "PA"
 }
 
 def procesar_informe_ciqa(file):
@@ -22,7 +22,7 @@ def procesar_informe_ciqa(file):
         for page in pdf.pages:
             texto_completo += page.extract_text() + "\n"
 
-    # 1. Extracción de Fecha (Normalización)
+    # 1. Extracción de Fecha (Normalización de "05 de enero de 2026")
     match_f = re.search(r'Fecha de muestreo[:\s]+(\d{2}) de (\w+) de (\d{4})', texto_completo, re.IGNORECASE)
     if match_f:
         dia, mes, anio = match_f.groups()
@@ -35,31 +35,27 @@ def procesar_informe_ciqa(file):
     total_parametros = 0
     fuera_de_limite = set()
 
-    # 2. Análisis por Línea (Para manejar SAL VLB y VLB 1 simultáneamente)
+    # 2. Análisis por Línea para contar sitios (SAL VLB y VLB 1)
     lineas = texto_completo.split('\n')
     for linea in lineas:
         linea_upper = linea.upper()
         
-        # Excluir N.S., N.A. y Temperatura (Instrucciones guardadas)
+        # Excluir N.A. y Temperatura
         if any(ex in linea_upper for ex in ["N.A.", "TEMPERATURA"]):
             continue
 
         for nombre_p, sigla in SIGLAS_MAP.items():
             if nombre_p.upper() in linea_upper:
-                # Encontramos todos los números con coma (ej: 0,10)
-                # CIQA pone el límite (ej: 3,00 o 5,00) al final de la línea.
+                # Buscamos valores numéricos (ej: 0,10 o 7,35)
                 valores = re.findall(r'\d+,\d+', linea)
                 
-                # REGLA DE CONTEO:
-                # En el archivo: Cloro tiene 2 valores, pH tiene 1 (el otro es N.S.), Turbiedad tiene 2.
-                # El último valor de la línea suele ser el límite, no lo contamos.
+                # En CIQA el último valor suele ser el límite fijo, no lo contamos
                 if len(valores) > 1:
-                    resultados_reales = valores[:-1] # Quitamos el límite S.R.H.
+                    resultados_reales = valores[:-1] 
                     total_parametros += len(resultados_reales)
                 
-                # REGLA DE LÍMITES:
-                # Si la línea contiene los asteriscos de "No cumple" (***)
-                if "***" in linea or "*" in linea:
+                # Si la línea contiene los asteriscos (***) de incumplimiento
+                if "***" in linea:
                     fuera_de_limite.add(sigla)
                 break
 
@@ -70,12 +66,11 @@ def procesar_informe_ciqa(file):
     }
 
 # --- APP ---
-archivo = st.file_uploader("Sube el PDF aquí", type="pdf")
+archivo = st.file_uploader("Sube el PDF de CIQA aquí", type="pdf")
 
 if archivo:
     res = procesar_informe_ciqa(archivo)
     
-    # Tabla con columnas solicitadas
     df = pd.DataFrame([{
         "fecha": res["fecha"],
         "parametros fuera del limite": res["parametros fuera del limite"],
@@ -84,6 +79,13 @@ if archivo:
     
     st.table(df)
 
-    # Excel
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpy
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False)
+    
+    st.download_button(
+        label="📥 Generar Archivo Excel",
+        data=output.getvalue(),
+        file_name=f"Reporte_{res['fecha'].replace('/','-')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
