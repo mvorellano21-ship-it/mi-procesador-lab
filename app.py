@@ -4,11 +4,10 @@ import pandas as pd
 import io
 import re
 
-# --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Procesador CIQA Final", layout="centered")
 st.markdown("<h1 style='text-align: center;'>Procesador de Informes de Laboratorio</h1>", unsafe_allow_html=True)
 
-# Diccionario de Siglas según instrucciones guardadas
+# Diccionario de Siglas según tus instrucciones
 SIGLAS_MAP = {
     "cloro residual": "cloro", "ph": "pH", "turbiedad": "Turbiedad", 
     "alcalinidad": "alcalinidad", "aluminio": "Al", "cloruros": "Cl", 
@@ -20,11 +19,11 @@ SIGLAS_MAP = {
     "zooplancton": "zoo", "microcistina": "MC"
 }
 
-def procesar_informe_definitivo(file):
+def procesar_informe(file):
     with pdfplumber.open(file) as pdf:
         texto_completo = "\n".join([p.extract_text() or "" for p in pdf.pages])
 
-    # 1. Extraer Fecha
+    # 1. Extraer Fecha (Normalización)
     match_f = re.search(r'Fecha de muestreo[:\s]+(\d{2}) de (\w+) de (\d{4})', texto_completo, re.IGNORECASE)
     meses = {"enero":"01","febrero":"02","marzo":"03","abril":"04","mayo":"05","junio":"06",
              "julio":"07","agosto":"08","septiembre":"09","octubre":"10","noviembre":"11","diciembre":"12"}
@@ -32,30 +31,43 @@ def procesar_informe_definitivo(file):
 
     total_parametros = 0
     fuera_de_limite = set()
-    bloques_procesados = set() # Para contar bloques como 1 solo
+    bloques_contados = set() # Para asegurar que COV, fito, zoo, MC solo sumen 1
 
     lineas = texto_completo.split('\n')
     for linea in lineas:
-        linea_low = linea.lower()
+        l_low = linea.lower()
         
-        # Excluir líneas vacías o de error de proceso
-        if "error (%)" in linea_low or "metodología" in linea_low:
+        # Saltamos líneas que son encabezados o metadatos
+        if "unidad" in l_low or "límite s.r.h." in l_low or "error (%)" in l_low:
             continue
 
         for nombre_p, sigla in SIGLAS_MAP.items():
-            if nombre_p in linea_low:
-                # Regla para Bloques (Solo cuentan 1 vez aunque tengan muchas sustancias debajo)
+            if nombre_p in l_low:
+                # REGLA PARA BLOQUES (COV, Plancton, Microcistinas)
                 if sigla in ["COV", "fito", "zoo", "MC"]:
-                    if sigla not in bloques_procesados:
+                    if sigla not in bloques_contados:
                         total_parametros += 1
-                        bloques_procesados.add(sigla)
+                        bloques_contados.add(sigla)
                 else:
-                    # Parámetros individuales (Cloro, pH, etc.)
-                    # Contamos si tiene una unidad o un valor "Ausencia/Presencia"
-                    if any(u in linea for u in ["mg/L", "UpH", "UNT", "UFC", "NMP", "Ausencia"]):
+                    # PARÁMETROS INDIVIDUALES
+                    # Buscamos si hay un resultado real: números (que no sean el código de 10 dígitos) o "Ausencia"
+                    tokens = linea.split()
+                    tiene_resultado = False
+                    for t in tokens:
+                        # Ignorar códigos de 10 dígitos (ej: 7426010901)
+                        if re.match(r'^\d{10}$', t):
+                            continue
+                        # Contar si es un número (con coma o punto) o texto de resultado
+                        if re.search(r'\d+,\d+|\d+\.\d+', t) or "Ausencia" in t or "<" in t:
+                            # Evitamos contar los límites conocidos del informe
+                            if t not in ["3,00", "5,00", "400", "500", "45", "1500", "0,2", "1,7"]:
+                                tiene_resultado = True
+                                break
+                    
+                    if tiene_resultado:
                         total_parametros += 1
                 
-                # Detección de Falla (Asteriscos)
+                # REGLA DE FALLA: Cualquier asterisco activa la sigla
                 if "*" in linea:
                     fuera_de_limite.add(sigla)
                 break
@@ -69,7 +81,7 @@ def procesar_informe_definitivo(file):
 # --- INTERFAZ ---
 archivo = st.file_uploader("Subir PDF", type="pdf")
 if archivo:
-    res = procesar_informe_definitivo(archivo)
+    res = procesar_informe(archivo)
     df = pd.DataFrame([{
         "fecha": res["fecha"], 
         "parametros fuera del limite": res["fuera"], 
