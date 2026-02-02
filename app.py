@@ -4,70 +4,59 @@ import pandas as pd
 import io
 import re
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Procesador CIQA", layout="centered")
-st.markdown("<h1 style='text-align: center;'>Procesador de Informes CIQA</h1>", unsafe_allow_html=True)
+# --- CONFIGURACIÓN DE INTERFAZ ---
+st.set_page_config(page_title="Procesador CIQA - 5 Parámetros", layout="centered")
+st.markdown("<h1 style='text-align: center;'>Procesador de Informes de Laboratorio</h1>", unsafe_allow_html=True)
 
+# Diccionario de Siglas según tus instrucciones
 SIGLAS_MAP = {
     "cloro residual": "cloro", "ph": "pH", "turbiedad": "Turbiedad", 
     "turbidez": "Turbiedad", "bacteria aerobias": "BAH", "coliformes": "BCT",
     "escherichia coli": "EC", "pseudomonas": "PA"
 }
 
-def procesar_ciqa(file):
+def procesar_informe_ciqa(file):
     with pdfplumber.open(file) as pdf:
+        # 1. Extraer Fecha (Página 1 o 2)
         texto_completo = "\n".join([p.extract_text() or "" for p in pdf.pages])
-        
-        # Fecha de Muestreo (Busca el formato exacto del informe)
         match_f = re.search(r'Fecha de muestreo[:\s]+(\d{2}/\d{2}/\d{4})', texto_completo, re.IGNORECASE)
         fecha = match_f.group(1) if match_f else "No detectada"
 
         total_parametros = 0
         fuera_de_limite = set()
         
-        # Secciones permitidas para contar parámetros
-        secciones_validas = [
-            "ENSAYOS REALIZADOS EN CAMPO", 
-            "ANÁLISIS FISICOQUÍMICOS", 
-            "ANÁLISIS BACTERIOLÓGICOS"
-        ]
-
+        # 2. Procesar Tablas de Resultados
         for page in pdf.pages:
             tablas = page.extract_tables()
-            texto_pag = page.extract_text() or ""
-            
-            # Solo procesar si la página pertenece a una sección de resultados
-            if not any(s in texto_pag.upper() for s in secciones_validas):
-                continue
-
             for tabla in tablas:
                 for fila in tabla:
+                    # Limpiar y filtrar filas vacías o encabezados
                     f = [str(c).strip() if c else "" for c in fila]
-                    # Una fila de parámetro válida en CIQA suele tener 5+ columnas y una unidad (mg/L, UNT, etc)
-                    if len(f) < 4 or f[0] == "" or "Parámetro" in f[0]:
+                    if not f or len(f) < 4 or "Parámetro" in f[0]:
                         continue
                     
-                    # Exclusiones
-                    if any(ex in f[0].upper() for ex in ["TEMPERATURA", "N.S.", "N.A."]):
+                    nombre_p = f[0].lower()
+                    
+                    # Regla de Exclusión (Temperatura, N.S., N.A.)
+                    if any(ex in nombre_p.upper() for ex in ["TEMPERATURA", "N.S.", "N.A."]):
                         continue
 
-                    # Contamos el parámetro (SAL VLB y VLB 1 cuentan como sitios distintos si hay datos en ambos)
-                    # En tu ejemplo hay 2 sitios con datos: SAL VLB y VLB 1
-                    sitios_con_datos = 0
-                    if f[1] and f[1] != "N.S.": sitios_con_datos += 1
-                    if f[2] and f[2] != "N.S.": sitios_con_datos += 1
+                    # --- LÓGICA DE CONTEO (Crucial para que dé 5) ---
+                    # Revisamos las columnas donde el laboratorio pone resultados (SAL VLB y VLB 1)
+                    # En CIQA suelen ser la columna 1 y 2 después del nombre del parámetro
+                    resultados_en_fila = f[1:3] # Toma las celdas de los dos sitios
                     
-                    total_parametros += sitios_con_datos
-                    
-                    # Detección de "Fuera de Límite" (CIQA usa *** para indicar error)
-                    nombre_p = f[0].lower()
-                    texto_fila = " ".join(f)
-                    
-                    if "***" in texto_fila:
-                        for clave, sigla in SIGLAS_MAP.items():
-                            if clave in nombre_p:
-                                fuera_de_limite.add(sigla)
-                                break
+                    for r in resultados_en_fila:
+                        # Si la celda tiene un resultado válido (no es N.S., ni está vacía)
+                        if r and r.upper() != "N.S." and r.upper() != "N.A.":
+                            total_parametros += 1
+                            
+                            # Detección de Fuera de Límite por asteriscos (***)
+                            if "***" in r:
+                                for clave, sigla in SIGLAS_MAP.items():
+                                    if clave in nombre_p:
+                                        fuera_de_limite.add(sigla)
+                                        break
         
         return {
             "Fecha": fecha,
@@ -75,13 +64,25 @@ def procesar_ciqa(file):
             "Parámetros totales": total_parametros
         }
 
-# --- INTERFAZ ---
-archivo = st.file_uploader("Cargar PDF", type="pdf")
+# --- INTERFAZ STREAMLIT ---
+archivo = st.file_uploader("Cargar PDF de Laboratorio", type="pdf")
+
 if archivo:
-    res = procesar_ciqa(archivo)
-    st.table(pd.DataFrame([res]))
-    
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        pd.DataFrame([res]).to_excel(writer, index=False)
-    st.download_button("Generar Excel", buf.getvalue(), "Reporte_CIQA.xlsx")
+    with st.spinner("Procesando..."):
+        res = procesar_informe_ciqa(archivo)
+        df = pd.DataFrame([res])
+        
+        st.markdown("### Previsualización de Datos")
+        st.table(df)
+        
+        # Botón de Descarga
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        
+        st.download_button(
+            label="🟢 Generar Archivo Excel",
+            data=buf.getvalue(),
+            file_name=f"Reporte_{res['Fecha'].replace('/','-')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
